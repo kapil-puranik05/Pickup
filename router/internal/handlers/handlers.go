@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"router/internal/database"
@@ -37,6 +38,22 @@ type ChainRegistrationResponse struct {
 	Registered bool `json:"registered"`
 }
 
+type RetrievalInitializationRequest struct {
+	ObjectId string `json:"objectId"`
+}
+
+type RetrievalInitializationResponse struct {
+	Chains []*registry.Chain `json:"chains"`
+}
+
+type UploadCompleteNotification struct {
+	ObjectId string `json:"objectId"`
+}
+
+type UploadCompleteResponse struct {
+	Success bool `json:"success"`
+}
+
 func UploadInitializationHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
@@ -53,7 +70,6 @@ func UploadInitializationHandler(w http.ResponseWriter, r *http.Request) {
 		Size:      req.Size,
 		ChunkSize: req.ChunkSize,
 		Status:    metadata.ObjectUploading,
-		LastChunk: -1,
 	}
 	if err := repo.Create(object); err != nil {
 		log.Printf("Error occurred while saving the object metadata: %v", err)
@@ -64,6 +80,63 @@ func UploadInitializationHandler(w http.ResponseWriter, r *http.Request) {
 	response := &UploadInitializationResponse{
 		ObjectId: object.ID,
 		Chains:   topology.Chains,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func UploadCompleteHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req UploadCompleteNotification
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		return
+	}
+	object, err := repo.FindByID(req.ObjectId)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	object.Status = metadata.ObjectReady
+	repo.Update(object)
+	response := UploadCompleteResponse{
+		Success: true,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func RetrievalInitializationHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req RetrievalInitializationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		return
+	}
+	obj, err := repo.FindByID(req.ObjectId)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if obj.Status != metadata.ObjectReady {
+		http.Error(w, fmt.Sprintf("Error: Object with Object Id: %s was not found", req.ObjectId), http.StatusNotFound)
+		return
+	}
+	topology := reg.CopyTopology()
+	response := &RetrievalInitializationResponse{
+		Chains: topology.Chains,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {

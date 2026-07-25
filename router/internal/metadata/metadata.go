@@ -16,7 +16,6 @@ type StorageObject struct {
 	Size      uint64       `gorm:"not null"`
 	ChunkSize int64        `gorm:"not null"`
 	Status    ObjectStatus `gorm:"type:varchar(20);not null"`
-	LastChunk int64        `gorm:"not null"`
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

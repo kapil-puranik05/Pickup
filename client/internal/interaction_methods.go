@@ -54,6 +54,10 @@ type ChunkUploadResponse struct {
 	IsWritten bool `json:"isWritten"`
 }
 
+type UploadCompleteNotification struct {
+	ObjectId string `json:"objectId"`
+}
+
 func ProcessFileInChunks(filename string, bufferSize int, processor func(Chunk) error) error {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -179,6 +183,19 @@ func UploadFile(filename string) error {
 	}); err != nil {
 		return err
 	}
+	completeUrl := "http://localhost:8000/upload-complete"
+	notification := &UploadCompleteNotification{
+		ObjectId: uploadResp.ObjectId,
+	}
+	body, err = json.Marshal(notification)
+	if err != nil {
+		return fmt.Errorf("Failed to marshal upload notification request: %v", err)
+	}
+	resp, err = http.Post(completeUrl, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("Error occurred while sending upload completion notification: %v", err)
+	}
+	resp.Body.Close()
 	return nil
 }
 
