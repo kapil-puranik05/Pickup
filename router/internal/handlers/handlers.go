@@ -39,11 +39,13 @@ type ChainRegistrationResponse struct {
 }
 
 type RetrievalInitializationRequest struct {
-	ObjectId string `json:"objectId"`
+	Key string `json:"key"`
 }
 
 type RetrievalInitializationResponse struct {
-	Chains []*registry.Chain `json:"chains"`
+	ObjectId       string            `json:"objectId"`
+	Chains         []*registry.Chain `json:"chains"`
+	NumberOfChunks uint64            `json:"numChunks"`
 }
 
 type UploadCompleteNotification struct {
@@ -125,18 +127,26 @@ func RetrievalInitializationHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
 		return
 	}
-	obj, err := repo.FindByID(req.ObjectId)
+	obj, err := repo.FindByKey(req.Key)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	if obj.Status != metadata.ObjectReady {
-		http.Error(w, fmt.Sprintf("Error: Object with Object Id: %s was not found", req.ObjectId), http.StatusNotFound)
+		http.Error(w, fmt.Sprintf("Error: Object with Object Id: %s was not found", req.Key), http.StatusNotFound)
 		return
 	}
 	topology := reg.CopyTopology()
+	var numChunks uint64
+	if obj.Size%uint64(obj.ChunkSize) == 0 {
+		numChunks = (obj.Size / uint64(obj.ChunkSize))
+	} else {
+		numChunks = (obj.Size / uint64(obj.ChunkSize)) + 1
+	}
 	response := &RetrievalInitializationResponse{
-		Chains: topology.Chains,
+		ObjectId:       obj.ID,
+		Chains:         topology.Chains,
+		NumberOfChunks: numChunks,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {

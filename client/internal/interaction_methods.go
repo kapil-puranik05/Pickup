@@ -8,6 +8,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"sync"
 )
 
 const (
@@ -25,6 +29,16 @@ type UploadResponse struct {
 	Chains   []*Chain `json:"chains"`
 }
 
+type RetrievalInitializationRequest struct {
+	Key string `json:"key"`
+}
+
+type RetrievalInitializationResponse struct {
+	ObjectId       string   `json:"objectId"`
+	Chains         []*Chain `json:"chains"`
+	NumberOfChunks uint64   `json:"numChunks"`
+}
+
 type Chain struct {
 	HeadAddress   string `json:"headAddress"`
 	TailAddress   string `json:"tailAddress"`
@@ -34,8 +48,8 @@ type Chain struct {
 }
 
 type Chunk struct {
-	ID   uint64
-	Data []byte
+	ID   uint64 `json:"id"`
+	Data []byte `json:"data"`
 }
 
 type ChunkUploadRequest struct {
@@ -46,16 +60,123 @@ type ChunkUploadRequest struct {
 	ChunkId        uint64 `json:"chunkId"`
 }
 
-type Config struct {
-	Epoch uint64 `json:"epoch"`
-}
-
 type ChunkUploadResponse struct {
 	IsWritten bool `json:"isWritten"`
 }
 
+type ChunkRetrievalRequest struct {
+	ObjectId string `json:"objectId"`
+}
+
+type Config struct {
+	Epoch uint64 `json:"epoch"`
+}
+
 type UploadCompleteNotification struct {
 	ObjectId string `json:"objectId"`
+}
+
+type ChunkIndex struct {
+	ID   uint64
+	path string
+}
+
+func ReceiveChunks(req *RetrievalInitializationResponse) ([]*ChunkIndex, string, error) {
+	baseDir := filepath.Join(req.ObjectId, "dump")
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		return nil, "", fmt.Errorf("error occurred while creating temporary storage for chunks")
+	}
+	var (
+		chunks []*ChunkIndex
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		errCh  = make(chan error, len(req.Chains))
+	)
+	for _, chain := range req.Chains {
+		wg.Add(1)
+		go func(chain *Chain) {
+			defer wg.Done()
+			request := &ChunkRetrievalRequest{
+				ObjectId: req.ObjectId,
+			}
+			body, err := json.Marshal(request)
+			if err != nil {
+				errCh <- fmt.Errorf("failed to marshal chunk retrieval request: %v", err)
+				return
+			}
+			url := fmt.Sprintf("http://%s/read", chain.TailAddress)
+			resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+			if err != nil {
+				errCh <- fmt.Errorf("failed to send retrieval request: %v", err)
+				return
+			}
+			defer resp.Body.Close()
+			decoder := json.NewDecoder(resp.Body)
+			for {
+				var chunk Chunk
+				err := decoder.Decode(&chunk)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					errCh <- fmt.Errorf("Error occurred while receiving chunk %d: %v", chunk.ID, err)
+					return
+				}
+				path := filepath.Join(baseDir, strconv.FormatUint(chunk.ID, 10))
+				if err := os.WriteFile(path, chunk.Data, 0644); err != nil {
+					errCh <- fmt.Errorf("Error occurred while writing chunk %d: %v", chunk.ID, err)
+					return
+				}
+				mu.Lock()
+				chunks = append(chunks, &ChunkIndex{
+					ID:   chunk.ID,
+					path: path,
+				})
+				mu.Unlock()
+			}
+		}(chain)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	if len(chunks) != int(req.NumberOfChunks) {
+		return nil, "", fmt.Errorf("Completeness Check Failed")
+	}
+	sort.Slice(chunks, func(i int, j int) bool {
+		return chunks[i].ID < chunks[j].ID
+	})
+	return chunks, "", nil
+}
+
+func AssembleFile(chunks []*ChunkIndex, key string, baseDir string) error {
+	outputPath := filepath.Join(key)
+	out, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("Failed to create output file: %v", err)
+	}
+	defer out.Close()
+	for _, chunk := range chunks {
+		in, err := os.Open(chunk.path)
+		if err != nil {
+			return fmt.Errorf("Failed to open chunk %d: %v", chunk.ID, err)
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			in.Close()
+			return fmt.Errorf("Failed to append chunk %d: %v", chunk.ID, err)
+		}
+		in.Close()
+		if err := os.Remove(chunk.path); err != nil {
+			return fmt.Errorf("Failed to delete temporary chunk %d: %v", chunk.ID, err)
+		}
+	}
+	if err := os.Remove(baseDir); err != nil {
+		return fmt.Errorf("Failed to remove temporary directory: %v", err)
+	}
+	return nil
 }
 
 func ProcessFileInChunks(filename string, bufferSize int, processor func(Chunk) error) error {
@@ -104,8 +225,9 @@ func UploadFile(filename string) error {
 		return fmt.Errorf("Failed to fetch file size: %v", err)
 	}
 	request := &UploadRequest{
-		Key:  filename,
-		Size: size,
+		Key:       filename,
+		Size:      size,
+		ChunkSize: (64 * 1024 * 1024),
 	}
 	body, err := json.Marshal(request)
 	if err != nil {
@@ -203,6 +325,29 @@ func DeleteFile(filename string) {
 
 }
 
-func RetrieveFile() {
-
+func RetrieveFile(filename string) error {
+	request := &RetrievalInitializationRequest{
+		Key: filename,
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("Failed to marshal retrieval request: %v", err)
+	}
+	url := "http://localhost:8000/retrieve"
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("Failed to send retrieval initialization request: %v", err)
+	}
+	var response RetrievalInitializationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return fmt.Errorf("Error occurred while decoding retrieval initialization response: %v", err)
+	}
+	chunks, baseDir, err := ReceiveChunks(&response)
+	if err != nil {
+		return err
+	}
+	if err := AssembleFile(chunks, filename, baseDir); err != nil {
+		return err
+	}
+	return nil
 }

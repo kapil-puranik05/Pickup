@@ -37,6 +37,7 @@ func main() {
 	mux.HandleFunc("/configure", node.NodeReconfigurationHandler)
 	mux.HandleFunc("/write", node.WriteHandler)
 	mux.HandleFunc("/acknowledge", node.AcknowlegementHandler)
+	mux.HandleFunc("/read", node.ReadHandler)
 	server := &http.Server{
 		Addr:    node.Address,
 		Handler: mux,

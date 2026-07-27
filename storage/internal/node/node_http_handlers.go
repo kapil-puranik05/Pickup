@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"storage/internal/shared"
 )
 
@@ -13,6 +14,10 @@ var (
 	node    = &Node{}
 	Address string
 )
+
+type ReadRequest struct {
+	ObjectId string `json:"objectId"`
+}
 
 type WriteResponse struct {
 	IsWritten bool `json:"isWritten"`
@@ -95,6 +100,29 @@ func WriteHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+func ReadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req ReadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	encoder := json.NewEncoder(w)
+	if err := node.read(filepath.Join(node.nodeId, req.ObjectId), encoder, flusher); err != nil {
+		log.Printf("Read error: %v", err)
 		return
 	}
 }

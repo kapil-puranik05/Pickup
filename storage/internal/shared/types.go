@@ -38,3 +38,8 @@ type NodeMetaDataDto struct {
 	NodeId  string `json:"nodeId"`
 	Address string `json:"address"`
 }
+
+type Chunk struct {
+	ID   uint64 `json:"id"`
+	Data []byte `json:"data"`
+}

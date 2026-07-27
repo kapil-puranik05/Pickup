@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -199,6 +200,43 @@ func (n *Node) write(req shared.WriteRequest) (bool, error) {
 		return true, nil
 	}
 	return true, nil
+}
+
+func (n *Node) read(dir string, encoder *json.Encoder, flusher http.Flusher) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("Error occurred while opening object directory: %v", err)
+	}
+	defer d.Close()
+	for {
+		entries, err := d.ReadDir(1)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("Error occurred while reading chunk: %v", err)
+		}
+		for _, entry := range entries {
+			val, err := strconv.ParseUint(entry.Name(), 10, 64)
+			if err != nil {
+				return fmt.Errorf("Error occurred while parsing chunk Id %s: %v", entry.Name(), err)
+			}
+			path := filepath.Join(dir, entry.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("Error occurred while reading chunk %s: %v", entry.Name(), err)
+			}
+			chunk := shared.Chunk{
+				ID:   val,
+				Data: data,
+			}
+			if err := encoder.Encode(chunk); err != nil {
+				return fmt.Errorf("Error occurred while encoding chunk %s: %v", entry.Name(), err)
+			}
+			flusher.Flush()
+		}
+	}
+	return nil
 }
 
 func (n *Node) acknowledge(req shared.AckRequest) error {
