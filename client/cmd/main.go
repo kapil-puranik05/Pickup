@@ -17,9 +17,14 @@ func main() {
 	// if err := internal.UploadFile(input); err != nil {
 	// 	log.Panic(err)
 	// }
+	// input, _ = reader.ReadString('\n')
+	// input = strings.TrimSpace(input)
+	// if err := internal.RetrieveFile(input); err != nil {
+	// 	log.Panic(err)
+	// }
 	input, _ := reader.ReadString('\n')
 	input = strings.TrimSpace(input)
-	if err := internal.RetrieveFile(input); err != nil {
+	if err := internal.DeleteFile(input); err != nil {
 		log.Panic(err)
 	}
 }

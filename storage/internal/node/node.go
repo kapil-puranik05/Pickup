@@ -138,67 +138,74 @@ func (n *Node) write(req shared.WriteRequest) (bool, error) {
 	nextAddress := n.nextAddress
 	prevAddress := n.prevAddress
 	n.configurationMutex.RUnlock()
-	log.Printf("Received epoch=%d Current epoch=%d", req.Epoch, n.currentEpoch)
+	log.Printf("Received epoch=%d Current epoch=%d", req.Epoch, epoch)
 	if req.Epoch < epoch {
-		return false, errors.New("Stale Epoch")
+		return false, errors.New("stale epoch")
 	}
 	if role == shared.RoleHead {
-		newSequenceNumber := atomic.AddUint64(&n.sequenceCounter, 1)
-		req.SequenceNumber = newSequenceNumber
+		req.SequenceNumber = atomic.AddUint64(&n.sequenceCounter, 1)
 	}
-	log.Println("Writing data to disk")
-	if err := os.MkdirAll(filepath.Join(n.nodeId, req.ObjectID), 0755); err != nil {
-		log.Printf("Error occurred while creating object group: %v", err)
-		return false, err
+	switch req.Command {
+	case "SET":
+		log.Println("Writing chunk to disk")
+		if err := os.MkdirAll(filepath.Join(n.nodeId, req.ObjectID), 0755); err != nil {
+			return false, err
+		}
+		file := strconv.FormatUint(req.ChunkId, 10)
+		path := filepath.Join(n.nodeId, req.ObjectID, file)
+		if err := os.WriteFile(path, req.Data, 0644); err != nil {
+			return false, err
+		}
+	case "DELETE":
+		log.Println("Deleting object from disk")
+		dir := filepath.Join(n.nodeId, req.ObjectID)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			log.Printf("Object %s already deleted", req.ObjectID)
+			return true, nil
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			return false, err
+		}
+	default:
+		return false, fmt.Errorf("Invalid command")
 	}
-	file := strconv.FormatUint(req.ChunkId, 10)
-	path := filepath.Join(n.nodeId, req.ObjectID, file)
-	if err := os.WriteFile(path, req.Data, 0644); err != nil {
-		log.Printf("Error occurred while writing chunk %d to the disk: %v", req.ChunkId, err)
-		return false, err
-	}
-	log.Println("Data written to disk successfully")
 	if role == shared.RoleHead || role == shared.RoleMiddle {
-		log.Println("Replicating data to successor node")
 		entry := &LogEntry{
 			SequenceNumber: req.SequenceNumber,
 			WriteRequest:   req,
 		}
-		err := n.appendLogEntry(entry)
+		if err := n.appendLogEntry(entry); err != nil {
+			return false, err
+		}
+		body, err := json.Marshal(req)
 		if err != nil {
 			return false, err
 		}
-		jsonData, err := json.Marshal(req)
-		if err != nil {
-			return false, fmt.Errorf("failed to marshal forward write payload: %w", err)
-		}
 		url := fmt.Sprintf("http://%s/write", nextAddress)
-		resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+		resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
 		if err != nil {
-			_ = os.Remove(path)
 			return false, fmt.Errorf("Failed forwarding write downstream to %s: %w", nextAddress, err)
 		}
-		resp.Body.Close()
+		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			_ = os.Remove(path)
-			return false, fmt.Errorf("Downstream node %s returned status: %d", nextAddress, resp.StatusCode)
+			return false, fmt.Errorf("Downstream node %s returned status %d", nextAddress, resp.StatusCode)
 		}
-	} else if role == shared.RoleTail {
-		log.Println("Data replicated to tail node")
-		ackReq := shared.AckRequest{
-			Epoch:          epoch,
-			SequenceNumber: req.SequenceNumber,
-		}
-		go func(addr string, payload shared.AckRequest) {
-			if addr == "" {
-				return
-			}
-			jsonData, _ := json.Marshal(payload)
-			url := fmt.Sprintf("http://%s/acknowledge", addr)
-			_, _ = http.Post(url, "application/json", bytes.NewBuffer(jsonData))
-		}(prevAddress, ackReq)
+		log.Println("Replication successful")
 		return true, nil
 	}
+	log.Println("Reached tail. Sending ACK upstream")
+	ackReq := shared.AckRequest{
+		Epoch:          epoch,
+		SequenceNumber: req.SequenceNumber,
+	}
+	go func(addr string, payload shared.AckRequest) {
+		if addr == "" {
+			return
+		}
+		body, _ := json.Marshal(payload)
+		url := fmt.Sprintf("http://%s/acknowledge", addr)
+		_, _ = http.Post(url, "application/json", bytes.NewBuffer(body))
+	}(prevAddress, ackReq)
 	return true, nil
 }
 

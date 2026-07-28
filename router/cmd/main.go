@@ -16,6 +16,8 @@ func main() {
 	mux.HandleFunc("/upload", handlers.UploadInitializationHandler)
 	mux.HandleFunc("/upload-complete", handlers.UploadCompleteHandler)
 	mux.HandleFunc("/retrieve", handlers.RetrievalInitializationHandler)
+	mux.HandleFunc("/delete", handlers.DeleteInitializationHandler)
+	mux.HandleFunc("/delete-complete", handlers.DeleteCompleteHandler)
 	server := &http.Server{
 		Addr:    "localhost:8000",
 		Handler: mux,

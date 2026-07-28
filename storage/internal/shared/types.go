@@ -20,6 +20,7 @@ type WriteRequest struct {
 	ObjectID       string `json:"objectId"`
 	Data           []byte `json:"data"`
 	ChunkId        uint64 `json:"chunkId"`
+	Command        string `json:"command"`
 }
 
 type AckRequest struct {

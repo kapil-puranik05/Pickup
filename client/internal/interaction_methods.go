@@ -58,6 +58,7 @@ type ChunkUploadRequest struct {
 	ObjectId       string `json:"objectId"`
 	Data           []byte `json:"data"`
 	ChunkId        uint64 `json:"chunkId"`
+	Command        string `json:"command"`
 }
 
 type ChunkUploadResponse struct {
@@ -68,11 +69,34 @@ type ChunkRetrievalRequest struct {
 	ObjectId string `json:"objectId"`
 }
 
+type DeleteInitializationRequest struct {
+	Key string `json:"key"`
+}
+
+type DeleteInitializationResponse struct {
+	ObjectId string   `json:"objectId"`
+	Chains   []*Chain `json:"chains"`
+}
+
+type ChunksDeletionRequest struct {
+	Epoch    uint64 `json:"epoch"`
+	ObjectId string `json:"objectId"`
+	Command  string `json:"command"`
+}
+
+type ChunksDeletionResponse struct {
+	IsWritten bool `json:"isWritten"`
+}
+
 type Config struct {
 	Epoch uint64 `json:"epoch"`
 }
 
 type UploadCompleteNotification struct {
+	ObjectId string `json:"objectId"`
+}
+
+type DeleteCompletionNotification struct {
 	ObjectId string `json:"objectId"`
 }
 
@@ -101,13 +125,13 @@ func ReceiveChunks(req *RetrievalInitializationResponse) ([]*ChunkIndex, string,
 			}
 			body, err := json.Marshal(request)
 			if err != nil {
-				errCh <- fmt.Errorf("failed to marshal chunk retrieval request: %v", err)
+				errCh <- fmt.Errorf("Failed to marshal chunk retrieval request: %v", err)
 				return
 			}
 			url := fmt.Sprintf("http://%s/read", chain.TailAddress)
 			resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
 			if err != nil {
-				errCh <- fmt.Errorf("failed to send retrieval request: %v", err)
+				errCh <- fmt.Errorf("Failed to send retrieval request: %v", err)
 				return
 			}
 			defer resp.Body.Close()
@@ -175,6 +199,47 @@ func AssembleFile(chunks []*ChunkIndex, key string, baseDir string) error {
 	}
 	if err := os.Remove(baseDir); err != nil {
 		return fmt.Errorf("Failed to remove temporary directory: %v", err)
+	}
+	return nil
+}
+
+func RemoveChunks(req *DeleteInitializationResponse) error {
+	epochs := make([]uint64, 0)
+	for _, chain := range req.Chains {
+		configUrl := fmt.Sprintf("http://%s/layout", chain.MasterAddress)
+		var epochResponse Config
+		resp, er := http.Get(configUrl)
+		if er != nil {
+			return fmt.Errorf("Failed to GET epoch")
+		}
+		if er = json.NewDecoder(resp.Body).Decode(&epochResponse); er != nil {
+			return fmt.Errorf("Failed to decode epoch response")
+		}
+		resp.Body.Close()
+		epochs = append(epochs, epochResponse.Epoch)
+	}
+	for index, chain := range req.Chains {
+		request := &ChunksDeletionRequest{
+			Epoch:    epochs[index],
+			ObjectId: req.ObjectId,
+			Command:  "DELETE",
+		}
+		body, err := json.Marshal(request)
+		if err != nil {
+			return fmt.Errorf("Error occurred while sending chunks deletion request: %v", err)
+		}
+		url := fmt.Sprintf("http://%s/write", chain.HeadAddress)
+		resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+		if err != nil {
+			return fmt.Errorf("Error occurred while sending chunks deletion request: %v", err)
+		}
+		var response ChunksDeletionResponse
+		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+			return fmt.Errorf("Error occurred while decoding chunks deletion response: %v", err)
+		}
+		if !response.IsWritten {
+			return fmt.Errorf("Error occurred while deleting chunks from chain %s: %v", chain.ChainId, err)
+		}
 	}
 	return nil
 }
@@ -272,6 +337,7 @@ func UploadFile(filename string) error {
 			ObjectId:       uploadResp.ObjectId,
 			Data:           c.Data,
 			ChunkId:        c.ID,
+			Command:        "SET",
 		}
 		nextIndex = (nextIndex + 1) % n
 		log.Printf("Sending chunk %d with epoch %d", c.ID, epochs[nextIndex])
@@ -321,8 +387,41 @@ func UploadFile(filename string) error {
 	return nil
 }
 
-func DeleteFile(filename string) {
-
+func DeleteFile(filename string) error {
+	request := &DeleteInitializationRequest{
+		Key: filename,
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("Failed to marshal delete initialization request: %v", err)
+	}
+	url := "http://localhost:8000/delete"
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("Failed to send delete initialization request: %v", err)
+	}
+	var response DeleteInitializationResponse
+	if err = json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return fmt.Errorf("Failed to decode delete initialization response: %v", err)
+	}
+	resp.Body.Close()
+	if err := RemoveChunks(&response); err != nil {
+		return err
+	}
+	notification := &DeleteCompletionNotification{
+		ObjectId: response.ObjectId,
+	}
+	body, err = json.Marshal(notification)
+	if err != nil {
+		return fmt.Errorf("Failed to marshal delete completion notification: %v", err)
+	}
+	url = "http://localhost:8000/delete-complete"
+	resp, err = http.Post(url, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("Error occurred while sending delete completion notification: %v", err)
+	}
+	resp.Body.Close()
+	return nil
 }
 
 func RetrieveFile(filename string) error {
