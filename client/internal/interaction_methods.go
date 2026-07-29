@@ -173,7 +173,7 @@ func ReceiveChunks(req *RetrievalInitializationResponse) ([]*ChunkIndex, string,
 	sort.Slice(chunks, func(i int, j int) bool {
 		return chunks[i].ID < chunks[j].ID
 	})
-	return chunks, "", nil
+	return chunks, baseDir, nil
 }
 
 func AssembleFile(chunks []*ChunkIndex, key string, baseDir string) error {
@@ -197,7 +197,7 @@ func AssembleFile(chunks []*ChunkIndex, key string, baseDir string) error {
 			return fmt.Errorf("Failed to delete temporary chunk %d: %v", chunk.ID, err)
 		}
 	}
-	if err := os.Remove(baseDir); err != nil {
+	if err := os.RemoveAll(baseDir); err != nil {
 		return fmt.Errorf("Failed to remove temporary directory: %v", err)
 	}
 	return nil

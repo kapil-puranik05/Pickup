@@ -8,7 +8,7 @@ import (
 )
 
 var rootCommand = &cobra.Command{
-	Use:   "obstore",
+	Use:   "client",
 	Short: "CLI for interaction with the object storage",
 }
 

@@ -184,9 +184,11 @@ func DeleteInitializationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	obj, err := repo.FindByKey(req.Key)
 	if err != nil {
+		http.Error(w, "Object does not exist", http.StatusNotFound)
 		return
 	}
 	if obj.Status != metadata.ObjectReady {
+		http.Error(w, "Object does not exist", http.StatusNotFound)
 		return
 	}
 	topology := reg.CopyTopology()
