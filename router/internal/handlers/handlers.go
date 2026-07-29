@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"router/internal/database"
@@ -75,12 +74,12 @@ type DeleteCompletionResponse struct {
 
 func UploadInitializationHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var req UploadIniitializationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The upload request payload is invalid")
 		return
 	}
 	object := &metadata.StorageObject{
@@ -92,7 +91,7 @@ func UploadInitializationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := repo.Create(object); err != nil {
 		log.Printf("Error occurred while saving the object metadata: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The router could not create metadata for this object")
 		return
 	}
 	topology := reg.CopyTopology()
@@ -102,24 +101,24 @@ func UploadInitializationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The router could not send the upload response")
 		return
 	}
 }
 
 func UploadCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var req UploadCompleteNotification
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The upload completion payload is invalid")
 		return
 	}
 	object, err := repo.FindByID(req.ObjectId)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "The uploaded object could not be found")
 		return
 	}
 	object.Status = metadata.ObjectReady
@@ -129,28 +128,28 @@ func UploadCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The router could not confirm upload completion")
 		return
 	}
 }
 
 func RetrievalInitializationHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var req RetrievalInitializationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The retrieval request payload is invalid")
 		return
 	}
 	obj, err := repo.FindByKey(req.Key)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "No object was found for the requested key")
 		return
 	}
 	if obj.Status != metadata.ObjectReady {
-		http.Error(w, fmt.Sprintf("Error: Object with Object Id: %s was not found", req.Key), http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "The requested object is not available for retrieval")
 		return
 	}
 	topology := reg.CopyTopology()
@@ -167,28 +166,28 @@ func RetrievalInitializationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The router could not send the retrieval response")
 		return
 	}
 }
 
 func DeleteInitializationHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var req DeleteInitializationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The delete request payload is invalid")
 		return
 	}
 	obj, err := repo.FindByKey(req.Key)
 	if err != nil {
-		http.Error(w, "Object does not exist", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "No object was found for the requested key")
 		return
 	}
 	if obj.Status != metadata.ObjectReady {
-		http.Error(w, "Object does not exist", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "The requested object is not available for deletion")
 		return
 	}
 	topology := reg.CopyTopology()
@@ -198,27 +197,28 @@ func DeleteInitializationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The router could not send the delete response")
 		return
 	}
 }
 
 func DeleteCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var req DeleteCompletionNotification
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The delete completion payload is invalid")
 		return
 	}
 	object, err := repo.FindByID(req.ObjectId)
 	if err != nil {
+		writeError(w, http.StatusNotFound, "The object scheduled for deletion could not be found")
 		return
 	}
 	if err := repo.Delete(object.ID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The router could not remove the object metadata")
 		return
 	}
 	response := &DeleteCompletionResponse{
@@ -226,19 +226,19 @@ func DeleteCompleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The router could not confirm delete completion")
 		return
 	}
 }
 
 func ChainRegistrationHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var req registry.ChainRegistrationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The chain registration payload is invalid")
 		return
 	}
 	reg.RegisterChain(req)
@@ -247,7 +247,7 @@ func ChainRegistrationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The router could not confirm chain registration")
 		return
 	}
 }

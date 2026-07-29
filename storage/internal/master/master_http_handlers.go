@@ -22,12 +22,12 @@ type LayoutDto struct {
 
 func (m *MasterNodeRegistry) HandleRegisterNode(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var dto shared.NodeMetaDataDto
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The node registration payload is invalid")
 		return
 	}
 	m.registerNode(&dto)
@@ -36,7 +36,7 @@ func (m *MasterNodeRegistry) HandleRegisterNode(w http.ResponseWriter, r *http.R
 
 func (m *MasterNodeRegistry) HandleGetLayout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts GET requests")
 		return
 	}
 	globalClusterLayout.LayoutMutex.RLock()
@@ -47,22 +47,24 @@ func (m *MasterNodeRegistry) HandleGetLayout(w http.ResponseWriter, r *http.Requ
 		Epoch:       globalClusterLayout.Epoch,
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(payload)
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		writeError(w, http.StatusInternalServerError, "The master could not send the cluster layout")
+	}
 }
 
 func (m *MasterNodeRegistry) HandleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var dto shared.NodeMetaDataDto
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The heartbeat payload is invalid")
 		return
 	}
 	err := m.updateLastSeen(dto)
 	if err != nil {
-		w.WriteHeader(http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "The sending node is not registered with this master")
 		return
 	}
 	w.WriteHeader(http.StatusOK)

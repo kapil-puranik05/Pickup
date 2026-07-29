@@ -108,7 +108,7 @@ type ChunkIndex struct {
 func ReceiveChunks(req *RetrievalInitializationResponse) ([]*ChunkIndex, string, error) {
 	baseDir := filepath.Join(req.ObjectId, "dump")
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
-		return nil, "", fmt.Errorf("error occurred while creating temporary storage for chunks")
+		return nil, "", fmt.Errorf("Could not prepare temporary storage for retrieval")
 	}
 	var (
 		chunks []*ChunkIndex
@@ -125,16 +125,20 @@ func ReceiveChunks(req *RetrievalInitializationResponse) ([]*ChunkIndex, string,
 			}
 			body, err := json.Marshal(request)
 			if err != nil {
-				errCh <- fmt.Errorf("Failed to marshal chunk retrieval request: %v", err)
+				errCh <- fmt.Errorf("Could not prepare the retrieval request")
 				return
 			}
 			url := fmt.Sprintf("http://%s/read", chain.TailAddress)
 			resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
 			if err != nil {
-				errCh <- fmt.Errorf("Failed to send retrieval request: %v", err)
+				errCh <- fmt.Errorf("Could not retrieve data from storage")
 				return
 			}
 			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				errCh <- readAPIError(resp, "Could not retrieve data from storage")
+				return
+			}
 			decoder := json.NewDecoder(resp.Body)
 			for {
 				var chunk Chunk
@@ -143,12 +147,12 @@ func ReceiveChunks(req *RetrievalInitializationResponse) ([]*ChunkIndex, string,
 					break
 				}
 				if err != nil {
-					errCh <- fmt.Errorf("Error occurred while receiving chunk %d: %v", chunk.ID, err)
+					errCh <- fmt.Errorf("Could not read chunk %d from storage", chunk.ID)
 					return
 				}
 				path := filepath.Join(baseDir, strconv.FormatUint(chunk.ID, 10))
 				if err := os.WriteFile(path, chunk.Data, 0644); err != nil {
-					errCh <- fmt.Errorf("Error occurred while writing chunk %d: %v", chunk.ID, err)
+					errCh <- fmt.Errorf("Could not store temporary chunk %d", chunk.ID)
 					return
 				}
 				mu.Lock()
@@ -168,7 +172,7 @@ func ReceiveChunks(req *RetrievalInitializationResponse) ([]*ChunkIndex, string,
 		}
 	}
 	if len(chunks) != int(req.NumberOfChunks) {
-		return nil, "", fmt.Errorf("Completeness Check Failed")
+		return nil, "", fmt.Errorf("Retrieved data is incomplete")
 	}
 	sort.Slice(chunks, func(i int, j int) bool {
 		return chunks[i].ID < chunks[j].ID
@@ -178,27 +182,33 @@ func ReceiveChunks(req *RetrievalInitializationResponse) ([]*ChunkIndex, string,
 
 func AssembleFile(chunks []*ChunkIndex, key string, baseDir string) error {
 	outputPath := filepath.Join(key)
+	objectDir := filepath.Dir(baseDir)
 	out, err := os.Create(outputPath)
 	if err != nil {
-		return fmt.Errorf("Failed to create output file: %v", err)
+		return fmt.Errorf("Could not create the output file")
 	}
 	defer out.Close()
 	for _, chunk := range chunks {
 		in, err := os.Open(chunk.path)
 		if err != nil {
-			return fmt.Errorf("Failed to open chunk %d: %v", chunk.ID, err)
+			return fmt.Errorf("Could not open temporary chunk %d", chunk.ID)
 		}
 		if _, err := io.Copy(out, in); err != nil {
 			in.Close()
-			return fmt.Errorf("Failed to append chunk %d: %v", chunk.ID, err)
+			return fmt.Errorf("Could not assemble the retrieved file")
 		}
 		in.Close()
 		if err := os.Remove(chunk.path); err != nil {
-			return fmt.Errorf("Failed to delete temporary chunk %d: %v", chunk.ID, err)
+			return fmt.Errorf("Could not clean up temporary chunk %d", chunk.ID)
 		}
 	}
 	if err := os.RemoveAll(baseDir); err != nil {
-		return fmt.Errorf("Failed to remove temporary directory: %v", err)
+		return fmt.Errorf("Could not clean up temporary retrieval data")
+	}
+	if objectDir != "." && objectDir != "" {
+		if err := os.Remove(objectDir); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("Could not remove the temporary object directory")
+		}
 	}
 	return nil
 }
@@ -206,14 +216,15 @@ func AssembleFile(chunks []*ChunkIndex, key string, baseDir string) error {
 func RemoveChunks(req *DeleteInitializationResponse) error {
 	epochs := make([]uint64, 0)
 	for _, chain := range req.Chains {
-		configUrl := fmt.Sprintf("http://%s/layout", chain.MasterAddress)
+		configURL := fmt.Sprintf("http://%s/layout", chain.MasterAddress)
 		var epochResponse Config
-		resp, er := http.Get(configUrl)
+		resp, er := http.Get(configURL)
 		if er != nil {
-			return fmt.Errorf("Failed to GET epoch")
+			return fmt.Errorf("Could not fetch the current cluster layout")
 		}
 		if er = json.NewDecoder(resp.Body).Decode(&epochResponse); er != nil {
-			return fmt.Errorf("Failed to decode epoch response")
+			resp.Body.Close()
+			return fmt.Errorf("Received an invalid cluster layout response")
 		}
 		resp.Body.Close()
 		epochs = append(epochs, epochResponse.Epoch)
@@ -226,19 +237,25 @@ func RemoveChunks(req *DeleteInitializationResponse) error {
 		}
 		body, err := json.Marshal(request)
 		if err != nil {
-			return fmt.Errorf("Error occurred while sending chunks deletion request: %v", err)
+			return fmt.Errorf("Could not prepare the delete request")
 		}
 		url := fmt.Sprintf("http://%s/write", chain.HeadAddress)
 		resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
 		if err != nil {
-			return fmt.Errorf("Error occurred while sending chunks deletion request: %v", err)
+			return fmt.Errorf("Could not send the delete request to storage")
+		}
+		if resp.StatusCode != http.StatusOK {
+			defer resp.Body.Close()
+			return readAPIError(resp, "Storage rejected the delete request")
 		}
 		var response ChunksDeletionResponse
 		if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-			return fmt.Errorf("Error occurred while decoding chunks deletion response: %v", err)
+			resp.Body.Close()
+			return fmt.Errorf("Received an invalid delete response from storage")
 		}
+		resp.Body.Close()
 		if !response.IsWritten {
-			return fmt.Errorf("Error occurred while deleting chunks from chain %s: %v", chain.ChainId, err)
+			return fmt.Errorf("Storage could not delete the object from chain %s", chain.ChainId)
 		}
 	}
 	return nil
@@ -247,30 +264,30 @@ func RemoveChunks(req *DeleteInitializationResponse) error {
 func ProcessFileInChunks(filename string, bufferSize int, processor func(Chunk) error) error {
 	file, err := os.Open(filename)
 	if err != nil {
-		return fmt.Errorf("Failed to open the file: %v", err)
+		return fmt.Errorf("Could not open the file")
 	}
 	defer file.Close()
 	buffer := make([]byte, bufferSize)
-	var chunkId uint64 = 0
+	var chunkID uint64 = 0
 	for {
 		n, err := file.Read(buffer)
 		if n > 0 {
 			data := make([]byte, n)
 			copy(data, buffer[:n])
 			chunk := Chunk{
-				ID:   chunkId,
+				ID:   chunkID,
 				Data: data,
 			}
 			if err := processor(chunk); err != nil {
 				return err
 			}
-			chunkId++
+			chunkID++
 		}
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("Failed to read the file: %v", err)
+			return fmt.Errorf("Could not read the file")
 		}
 	}
 	return nil
@@ -287,7 +304,7 @@ func GetFileSize(filename string) (uint64, error) {
 func UploadFile(filename string) error {
 	size, err := GetFileSize(filename)
 	if err != nil {
-		return fmt.Errorf("Failed to fetch file size: %v", err)
+		return fmt.Errorf("Could not read the selected file")
 	}
 	request := &UploadRequest{
 		Key:       filename,
@@ -296,31 +313,32 @@ func UploadFile(filename string) error {
 	}
 	body, err := json.Marshal(request)
 	if err != nil {
-		return fmt.Errorf("Failed to marshal metadata: %v", err)
+		return fmt.Errorf("Could not prepare the upload request")
 	}
 	resp, err := http.Post("http://localhost:8000/upload", "application/json", bytes.NewBuffer(body))
 	if err != nil {
-		return fmt.Errorf("Failed to send request: %v", err)
+		return fmt.Errorf("Could not reach the router service")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Server returned: %s", resp.Status)
+		return readAPIError(resp, "Upload could not be started")
 	}
 	var uploadResp UploadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&uploadResp); err != nil {
-		return fmt.Errorf("Failed to decode response: %v", err)
+		return fmt.Errorf("Received an invalid upload response from the router")
 	}
 	log.Printf("Chains received: %d", len(uploadResp.Chains))
 	epochs := make([]uint64, 0)
 	for _, chain := range uploadResp.Chains {
-		configUrl := fmt.Sprintf("http://%s/layout", chain.MasterAddress)
+		configURL := fmt.Sprintf("http://%s/layout", chain.MasterAddress)
 		var epochResponse Config
-		resp, er := http.Get(configUrl)
+		resp, er := http.Get(configURL)
 		if er != nil {
-			return fmt.Errorf("Failed to GET epoch")
+			return fmt.Errorf("Could not fetch the current cluster layout")
 		}
 		if er = json.NewDecoder(resp.Body).Decode(&epochResponse); er != nil {
-			return fmt.Errorf("Failed to decode epoch response")
+			resp.Body.Close()
+			return fmt.Errorf("Received an invalid cluster layout response")
 		}
 		resp.Body.Close()
 		epochs = append(epochs, epochResponse.Epoch)
@@ -330,7 +348,6 @@ func UploadFile(filename string) error {
 	n := len(uploadResp.Chains)
 	if err := ProcessFileInChunks(filename, bufferSize, func(c Chunk) error {
 		chain := uploadResp.Chains[nextIndex]
-		// Note: The sequence number that we use here does not represent the ID of the chunk. It represents the sequence number that the client has sent to the chain for replication.
 		chunkUploadRequest := &ChunkUploadRequest{
 			Epoch:          epochs[nextIndex],
 			SequenceNumber: 0,
@@ -343,45 +360,48 @@ func UploadFile(filename string) error {
 		log.Printf("Sending chunk %d with epoch %d", c.ID, epochs[nextIndex])
 		body, er := json.Marshal(chunkUploadRequest)
 		if er != nil {
-			return fmt.Errorf("Failed to marshal chunk: %v", err)
+			return fmt.Errorf("Could not prepare file data for upload")
 		}
 		url := fmt.Sprintf("http://%s/write", chain.HeadAddress)
 		resp, er = http.Post(url, "application/json", bytes.NewBuffer(body))
 		if er != nil {
-			return fmt.Errorf("Failed to upload chunk")
+			return fmt.Errorf("Could not upload file data to storage")
 		}
 		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			return fmt.Errorf("write failed: %s: %s", resp.Status, string(body))
+			defer resp.Body.Close()
+			return readAPIError(resp, "Storage rejected the upload request")
 		}
 		var chunkUploadResponse ChunkUploadResponse
 		if er = json.NewDecoder(resp.Body).Decode(&chunkUploadResponse); er != nil {
 			log.Println(resp.Status)
 			fmt.Println(er)
 			resp.Body.Close()
-			return fmt.Errorf("Failed to decode chunk upload response")
+			return fmt.Errorf("Received an invalid response from storage")
 		}
 		resp.Body.Close()
 		if !chunkUploadResponse.IsWritten {
-			return fmt.Errorf("Failed to write chunk %d", c.ID)
+			return fmt.Errorf("Storage could not save chunk %d", c.ID)
 		}
 		log.Printf("Chunk %d written successfully", c.ID)
 		return nil
 	}); err != nil {
 		return err
 	}
-	completeUrl := "http://localhost:8000/upload-complete"
+	completeURL := "http://localhost:8000/upload-complete"
 	notification := &UploadCompleteNotification{
 		ObjectId: uploadResp.ObjectId,
 	}
 	body, err = json.Marshal(notification)
 	if err != nil {
-		return fmt.Errorf("Failed to marshal upload notification request: %v", err)
+		return fmt.Errorf("Could not prepare the upload completion request")
 	}
-	resp, err = http.Post(completeUrl, "application/json", bytes.NewBuffer(body))
+	resp, err = http.Post(completeURL, "application/json", bytes.NewBuffer(body))
 	if err != nil {
-		return fmt.Errorf("Error occurred while sending upload completion notification: %v", err)
+		return fmt.Errorf("Upload finished, but completion could not be confirmed")
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return readAPIError(resp, "Upload finished, but completion could not be confirmed")
 	}
 	resp.Body.Close()
 	return nil
@@ -393,16 +413,21 @@ func DeleteFile(filename string) error {
 	}
 	body, err := json.Marshal(request)
 	if err != nil {
-		return fmt.Errorf("Failed to marshal delete initialization request: %v", err)
+		return fmt.Errorf("Could not prepare the delete request")
 	}
 	url := "http://localhost:8000/delete"
 	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
 	if err != nil {
-		return fmt.Errorf("Failed to send delete initialization request: %v", err)
+		return fmt.Errorf("Could not reach the router service")
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return readAPIError(resp, "Delete could not be started")
 	}
 	var response DeleteInitializationResponse
 	if err = json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return fmt.Errorf("Failed to decode delete initialization response: %v", err)
+		resp.Body.Close()
+		return fmt.Errorf("Received an invalid delete response from the router")
 	}
 	resp.Body.Close()
 	if err := RemoveChunks(&response); err != nil {
@@ -413,12 +438,16 @@ func DeleteFile(filename string) error {
 	}
 	body, err = json.Marshal(notification)
 	if err != nil {
-		return fmt.Errorf("Failed to marshal delete completion notification: %v", err)
+		return fmt.Errorf("Could not prepare the delete completion request")
 	}
 	url = "http://localhost:8000/delete-complete"
 	resp, err = http.Post(url, "application/json", bytes.NewBuffer(body))
 	if err != nil {
-		return fmt.Errorf("Error occurred while sending delete completion notification: %v", err)
+		return fmt.Errorf("Delete finished, but completion could not be confirmed")
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return readAPIError(resp, "Delete finished, but completion could not be confirmed")
 	}
 	resp.Body.Close()
 	return nil
@@ -430,17 +459,23 @@ func RetrieveFile(filename string) error {
 	}
 	body, err := json.Marshal(request)
 	if err != nil {
-		return fmt.Errorf("Failed to marshal retrieval request: %v", err)
+		return fmt.Errorf("Could not prepare the retrieval request")
 	}
 	url := "http://localhost:8000/retrieve"
 	resp, err := http.Post(url, "application/json", bytes.NewBuffer(body))
 	if err != nil {
-		return fmt.Errorf("Failed to send retrieval initialization request: %v", err)
+		return fmt.Errorf("Could not reach the router service")
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return readAPIError(resp, "Retrieval could not be started")
 	}
 	var response RetrievalInitializationResponse
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return fmt.Errorf("Error occurred while decoding retrieval initialization response: %v", err)
+		resp.Body.Close()
+		return fmt.Errorf("Received an invalid retrieval response from the router")
 	}
+	resp.Body.Close()
 	chunks, baseDir, err := ReceiveChunks(&response)
 	if err != nil {
 		return err

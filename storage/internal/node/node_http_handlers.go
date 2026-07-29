@@ -39,7 +39,7 @@ func SendRegistrationRequest() {
 
 func HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts GET requests")
 		return
 	}
 	w.Write([]byte("Server is running"))
@@ -47,20 +47,20 @@ func HealthCheckHandler(w http.ResponseWriter, r *http.Request) {
 
 func NodeReconfigurationHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var cmd shared.ReConfigCommand
 	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
-		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The reconfiguration request payload is invalid")
 		return
 	}
 	if err := node.reconfigure(cmd); err != nil {
 		if err.Error() == "Stale Epoch" {
-			http.Error(w, err.Error(), http.StatusConflict)
+			writeError(w, http.StatusConflict, "The request was rejected because the epoch is outdated")
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The node could not apply the reconfiguration request")
 		return
 	}
 	response := &NodeReconfigurationResponse{
@@ -69,29 +69,29 @@ func NodeReconfigurationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The node could not confirm the reconfiguration")
 		return
 	}
 }
 
 func WriteHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var req shared.WriteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("Decode error: %v", err)
-		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The write request payload is invalid")
 		return
 	}
 	val, err := node.write(req)
 	if err != nil {
 		if err.Error() == "Stale Epoch" {
-			http.Error(w, err.Error(), http.StatusConflict)
+			writeError(w, http.StatusConflict, "The write request was rejected because the epoch is outdated")
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The node could not complete the write request")
 		return
 	}
 	response := &WriteResponse{
@@ -99,50 +99,51 @@ func WriteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The node could not confirm the write request")
 		return
 	}
 }
 
 func ReadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var req ReadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The read request payload is invalid")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "Chunk streaming is not supported on this connection")
 		return
 	}
 	encoder := json.NewEncoder(w)
 	if err := node.read(filepath.Join(node.nodeId, req.ObjectId), encoder, flusher); err != nil {
 		log.Printf("Read error: %v", err)
+		writeError(w, http.StatusInternalServerError, "The node could not read the requested object")
 		return
 	}
 }
 
 func AcknowlegementHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Error: Method not allowed", http.StatusMethodNotAllowed)
+		writeError(w, http.StatusMethodNotAllowed, "This endpoint only accepts POST requests")
 		return
 	}
 	var req shared.AckRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Error: Unable to parse the request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "The acknowledgement payload is invalid")
 		return
 	}
 	if err := node.acknowledge(req); err != nil {
 		if err.Error() == "Stale Epoch" {
-			http.Error(w, err.Error(), http.StatusConflict)
+			writeError(w, http.StatusConflict, "The acknowledgement was rejected because the epoch is outdated")
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "The node could not process the acknowledgement")
 		return
 	}
 	w.WriteHeader(http.StatusOK)

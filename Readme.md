@@ -1,212 +1,196 @@
 # Distributed Object Storage System
 
-This project is a Go-based prototype of a distributed object storage system built around chunked file storage, chain replication, and centralized metadata management.
+This project is my attempt at building a simple distributed object storage system in Go. The main goal was to understand how distributed storage can be designed when metadata management, replication, failure handling, and client interaction are all treated as separate concerns.
 
-At a high level, the system lets a client upload, retrieve, and delete files by splitting them into chunks, distributing those chunks through a storage chain, and tracking object metadata through a router service backed by PostgreSQL.
+Instead of storing a file as one large blob, the system breaks it into chunks, sends those chunks through a storage chain, and keeps track of the object metadata through a router service backed by PostgreSQL.
 
-## What This Project Is About
+## What I Built
 
-The repository explores how a distributed storage system can be organized using:
+The system is divided into three main parts:
 
-- A client that talks to the control plane and storage nodes
-- A router that manages metadata and exposes the public API
-- A master service that manages storage node membership and chain layout
-- Storage nodes that replicate chunks across a chain and serve reads from the tail
+- `client`
+- `router`
+- `storage`
 
-The design reflects core distributed systems ideas such as:
+Each part has a specific responsibility.
 
-- Chunk-based object storage
-- Chain replication
-- Epoch-based reconfiguration
-- Heartbeat-driven failure detection
-- Separation of metadata from data path operations
+### Client
 
-## Architecture Overview
+The client is used to trigger file operations:
 
-The system is split into three main modules:
+- upload
+- retrieve
+- delete
 
-### 1. Client
+For an upload, the client first contacts the router, gets an object ID and the active chain information, fetches the current epoch from the master, and then sends chunks to the head node.
 
-The client is responsible for initiating file operations:
+For retrieval, the client asks the router for metadata, contacts the tail nodes to stream chunks back, and then reconstructs the file locally.
 
-- Upload a file
-- Retrieve a file
-- Delete a file
+For deletion, the client again starts with the router, sends delete commands through the chain, and finally notifies the router when cleanup is complete.
 
-For uploads, the client:
+### Router
 
-1. Sends file metadata to the router
-2. Receives an object ID and active chain topology
-3. Fetches the current epoch from each chain master
-4. Splits the file into 64 MB chunks
-5. Sends chunks to the head of the selected chain
-6. Notifies the router after upload completion
-
-For retrieval, the client:
-
-1. Asks the router for object metadata and chain topology
-2. Requests chunks from chain tails
-3. Reassembles the chunks in order into the original file
-
-For delete, the client:
-
-1. Asks the router for the object ID and topology
-2. Sends delete commands into the chain
-3. Notifies the router to remove metadata after storage cleanup
-
-### 2. Router
-
-The router acts as the metadata and coordination layer exposed on `localhost:8000`.
+The router acts as the metadata layer and the main public entrypoint for the system. It currently runs on `localhost:8000`.
 
 Its responsibilities include:
 
-- Registering active storage chains
-- Creating object metadata on upload initialization
-- Marking uploads complete
-- Returning retrieval metadata
-- Returning delete metadata
-- Removing object metadata after delete completion
+- registering active chains
+- creating metadata during upload initialization
+- marking uploads as complete
+- returning metadata required for retrieval
+- returning metadata required for delete
+- removing metadata once delete completes
 
-Object metadata is stored in PostgreSQL using GORM. Each object record contains:
+Metadata is stored in PostgreSQL using GORM.
+
+Each stored object has:
 
 - `ID`
 - `Key`
 - `Size`
 - `ChunkSize`
 - `Status`
-- Timestamps
+- timestamps
 
-The object status lifecycle currently includes:
+The current object lifecycle uses these states:
 
 - `UPLOADING`
 - `READY`
 - `DELETED`
 
-## 3. Storage Subsystem
+### Storage Subsystem
 
-The storage subsystem is made of:
+The storage side is made up of:
 
-- One master process per chain
-- Multiple storage node processes
+- one master
+- multiple storage nodes
 
-### Master
+The master manages node membership and chain layout, while the nodes actually store and replicate the chunks.
+
+## Core Idea
+
+The design of this project is based mainly on chain replication.
+
+When a write comes in:
+
+1. it enters through the head node
+2. it gets forwarded along the chain
+3. the tail node finishes the write
+4. an acknowledgement travels back upstream
+
+Reads are served from the tail. The idea is that the tail reflects the latest committed state.
+
+Deletes use the same chain path, except the command sent is `DELETE` instead of a normal chunk write.
+
+## Master Responsibilities
 
 The master is responsible for:
 
-- Registering nodes as they join
-- Maintaining the active chain layout
-- Assigning node roles
-- Tracking the current epoch
-- Detecting node failures using heartbeats
-- Reconfiguring the chain when membership changes
-- Registering the active chain with the router
+- registering nodes
+- maintaining the active chain layout
+- assigning node roles
+- tracking the current epoch
+- checking heartbeats
+- detecting failed nodes
+- reconfiguring the chain when membership changes
+- registering the active chain with the router
 
-The master exposes endpoints for:
-
-- Node registration
-- Layout queries
-- Heartbeats
-
-### Storage Nodes
-
-Each node:
-
-- Loads its local configuration from `node.json`
-- Registers with the chain master
-- Accepts reconfiguration commands
-- Stores chunks on local disk
-- Replicates writes to the next node in the chain
-- Sends acknowledgements back upstream
-- Serves reads from local chunk directories
-
-Roles assigned by the master:
+The roles currently used in the chain are:
 
 - `HEAD`
 - `MIDDLE`
 - `TAIL`
 - `ORPHAN`
 
-### Chain Replication Model
+## Storage Node Responsibilities
 
-Writes enter through the head node and flow downstream node by node until they reach the tail. Once the tail persists the data, it sends an acknowledgement upstream. Intermediate nodes maintain a local transit log so in-flight operations can be tracked until acknowledged.
+Each storage node:
 
-Reads are served from the tail node. This matches the chain-replication idea that the tail represents the most up-to-date committed state.
+- loads its config from `node.json`
+- registers itself with the master
+- accepts reconfiguration commands
+- stores chunks on local disk
+- forwards writes to the next node
+- sends acknowledgements upstream
+- serves chunk reads from local storage
 
-Deletes reuse the same replication path by sending a `DELETE` command instead of a chunk write.
+Each node also maintains a `log.txt` file that acts as a transit log for writes that have been forwarded but not yet acknowledged.
 
-## Request Flow Summary
+## Request Flow
 
-### Upload Flow
+### Upload
 
-1. Client sends upload initialization request to router
-2. Router creates metadata with `UPLOADING` status
-3. Router returns object ID and registered chains
-4. Client fetches current epoch from each chain master
-5. Client sends chunks to chain heads
-6. Nodes replicate chunks down the chain
-7. Tail sends ACKs upstream
-8. Client notifies router that upload is complete
-9. Router marks the object as `READY`
+1. client sends upload initialization request to router
+2. router creates metadata with `UPLOADING` status
+3. router returns object ID and chain information
+4. client fetches the current epoch
+5. client splits the file into 64 MB chunks
+6. client sends chunks to chain heads
+7. nodes replicate the chunks through the chain
+8. tail sends ACKs back upstream
+9. client notifies router after upload completes
+10. router marks the object as `READY`
 
-### Retrieval Flow
+### Retrieval
 
-1. Client sends retrieval initialization request to router
-2. Router returns object ID, topology, and chunk count
-3. Client requests chunk streams from chain tails
-4. Client stores temporary chunk files
-5. Client sorts chunks by chunk ID
-6. Client reconstructs the original file
+1. client asks router for object metadata
+2. router returns object ID, topology, and chunk count
+3. client requests chunk streams from tail nodes
+4. client stores chunks temporarily
+5. chunks are sorted by chunk ID
+6. file is reconstructed locally
 
-### Delete Flow
+### Delete
 
-1. Client sends delete initialization request to router
-2. Router returns object ID and topology
-3. Client fetches current epoch from each chain master
-4. Client sends `DELETE` commands to chain heads
-5. Nodes delete local object directories and replicate the delete
-6. Client notifies router after storage deletion completes
-7. Router removes the object metadata
+1. client asks router to initialize delete
+2. router returns object ID and chain info
+3. client fetches the epoch
+4. client sends `DELETE` requests to the head nodes
+5. nodes delete their local object directories and forward the delete
+6. client notifies router when delete is complete
+7. router removes the metadata
 
-## Repository Structure
+## Project Structure
 
 ```text
 Distributed Object Storage System/
-├── client/
-│   ├── go.mod
-│   └── internal/
-├── router/
-│   ├── cmd/
-│   ├── internal/
-│   │   ├── database/
-│   │   ├── handlers/
-│   │   ├── metadata/
-│   │   └── repositories/
-│   └── go.mod
-├── storage/
-│   ├── cmd/
-│   │   ├── master/
-│   │   └── node/
-│   ├── internal/
-│   │   ├── master/
-│   │   ├── node/
-│   │   └── shared/
-│   ├── master1/
-│   ├── node1/
-│   ├── node2/
-│   ├── node3/
-│   ├── cluster_start.ps1
-│   ├── cluster_start.sh
-│   └── go.mod
-├── Architecture.png
-├── Readme.md
-└── Test Checklist.md
+|-- client/
+|   |-- cmd/
+|   |-- internal/
+|   `-- go.mod
+|-- router/
+|   |-- cmd/
+|   |-- internal/
+|   |   |-- database/
+|   |   |-- handlers/
+|   |   |-- metadata/
+|   |   `-- repositories/
+|   `-- go.mod
+|-- storage/
+|   |-- cmd/
+|   |   |-- master/
+|   |   `-- node/
+|   |-- internal/
+|   |   |-- master/
+|   |   |-- node/
+|   |   `-- shared/
+|   |-- master1/
+|   |-- node1/
+|   |-- node2/
+|   |-- node3/
+|   |-- cluster_start.ps1
+|   |-- cluster_start.sh
+|   `-- go.mod
+|-- Architecture.png
+|-- Readme.md
+`-- Test Checklist.md
 ```
 
 ## Configuration
 
-### Router
+### Router Database Variables
 
-The router expects database configuration through environment variables:
+The router expects these environment variables:
 
 - `DB_HOST`
 - `DB_USER`
@@ -214,145 +198,135 @@ The router expects database configuration through environment variables:
 - `DB_NAME`
 - `DB_PORT`
 
-### Master
+### Master Configuration
 
-The storage master reads its configuration from:
+The master reads its configuration using:
 
 - `MASTER_PATH`
 
-Example value used by the provided PowerShell startup script:
+In the provided PowerShell setup, this points to:
 
 - `./master1`
 
-### Nodes
+### Node Configuration
 
-Each storage node reads its configuration from:
+Each node reads its configuration using:
 
 - `NODE_PATH`
 
-Example values used by the provided PowerShell startup scripts:
+The PowerShell helper scripts use:
 
 - `./node1`
 - `./node2`
 - `./node3`
 
-Each node configuration file includes:
+Each node config includes:
 
-- Node address
-- Master address
-- Node ID
+- node address
+- master address
+- node ID
 
-## Running the Project
+## How to Run
 
-### Router
+### Start the Router
 
-Start the router after setting the PostgreSQL environment variables:
+After setting up the PostgreSQL environment variables:
 
 ```powershell
 cd router
 go run ./cmd
 ```
 
-### Storage Cluster on Windows
-
-The repository includes a helper script:
+### Start the Storage Cluster on Windows
 
 ```powershell
 cd storage
 .\cluster_start.ps1
 ```
 
-This script launches:
+This launches:
 
-- One master process
-- Three storage node processes
+- one master
+- three storage nodes
 
-### Storage Cluster on Linux
-
-The repository also includes:
+### Start the Storage Cluster on Linux
 
 ```bash
 cd storage
 ./cluster_start.sh
 ```
 
-### Client
-
-Run the client from the `client` module:
+### Run the Client
 
 ```powershell
 cd client
 go run .
 ```
 
-Note: the current client entrypoint is set up for manual testing and currently invokes delete behavior by default, while upload and retrieval calls are present in code but commented for interactive switching.
+The client is mainly set up for manual testing right now.
 
-## Storage Layout on Disk
+## Local Storage Layout
 
-Each storage node stores object data locally in a per-node directory structure. Chunks are written under folders named by object ID, with each chunk stored as a file named by its chunk index.
+On disk, each node stores chunks in directories named after the object ID. Each chunk is stored as a file using its chunk number.
 
-This means the local disk layout conceptually looks like:
+Conceptually it looks like this:
 
 ```text
 node1/
-└── <object-id>/
-    ├── 0
-    ├── 1
-    └── 2
+`-- <object-id>/
+    |-- 0
+    |-- 1
+    `-- 2
 ```
 
-Nodes also maintain a `log.txt` file that records forwarded write operations until they are acknowledged.
+## Reliability Features Included
 
-## Reliability Features
+This project currently includes:
 
-The implementation includes several important distributed system mechanisms:
-
-- Periodic heartbeats from nodes to master
-- Failure detection based on heartbeat timeout
-- Epoch-based stale request rejection
-- Role reassignment during reconfiguration
-- ACK propagation from tail to head
-- Transit-log compaction after acknowledgements
+- heartbeats from nodes to master
+- failure detection based on heartbeat timeout
+- epoch-based stale request rejection
+- role reassignment during reconfiguration
+- acknowledgement propagation from tail to head
+- log compaction after ACKs
 
 ## Testing
 
-The file `Test Checklist.md` contains a detailed validation plan covering:
+I also kept a `Test Checklist.md` file to organize the validation work. It includes:
 
-- Functional tests
-- Consistency tests
-- Failure handling
-- Recovery scenarios
-- Stress testing
-- Performance measurement
-- Cleanup validation
-
-This checklist is useful as the primary guide for verifying correctness and resilience of the system.
+- functional tests
+- consistency tests
+- failure handling cases
+- recovery scenarios
+- stress tests
+- performance measurements
+- cleanup checks
 
 ## Current Scope
 
-This repository is a prototype implementation focused on system behavior and architecture rather than production hardening.
+This is a prototype project. The focus was more on understanding the distributed systems side of the problem than on making it production-ready.
 
-It already demonstrates:
+What it already demonstrates:
 
-- Multi-process distributed coordination
-- Persistent metadata management
-- Replicated chunk writes
-- Streaming chunk retrieval
-- Reconfiguration logic for node membership changes
+- chunk-based object storage
+- centralized metadata handling
+- chain replication
+- client-driven upload, retrieval, and delete flows
+- node reconfiguration with epochs
+- multi-process coordination
 
-## Possible Future Improvements
+## Possible Improvements
 
-Natural next steps for this project could include:
+If I continue working on this, some obvious next steps would be:
 
-- A clearer end-user CLI for upload, retrieve, and delete
-- Better bootstrap and setup documentation
-- Automated integration tests
-- Stronger recovery behavior for partially completed operations
-- Multi-chain chunk placement policies
-- Checksums and corruption detection
-- Authentication and authorization
-- Metrics, observability, and tracing
+- improving the CLI experience
+- adding stronger recovery for partial failures
+- writing proper integration tests
+- supporting better placement across multiple chains
+- adding checksums for corruption detection
+- adding metrics and observability
+- improving setup and deployment documentation
 
-## Summary
+## Final Note
 
-This project is a distributed object storage prototype built in Go that combines a router-based metadata plane with a master-managed chain-replicated storage plane. Files are chunked, replicated through storage nodes, and reconstructed from tail reads, while epochs and heartbeats help the cluster respond to failures and topology changes.
+This project was mainly built as a systems exercise to understand how storage nodes, replication, metadata, and failure handling fit together in a distributed object store. It is not production-grade, but it helped me explore the architecture and tradeoffs involved in building one from scratch.
